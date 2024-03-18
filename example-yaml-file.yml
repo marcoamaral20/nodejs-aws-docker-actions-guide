@@ -1,0 +1,99 @@
+name: Build, Publish Docker Image, and Update EC2 Container
+
+on:
+  push:
+    branches:
+      - YOUR MAIN BRANCH
+  pull_request:
+    branches:
+      - YOUR MAIN BRANCH
+
+env:
+  AWS_REGION: <your_aws_region>
+  ECR_REPO_NAME: <your_ecr_repository_name>
+  SSH_USER: <your_ssh_username>
+  CONTAINER_NAME: <your_container_name>
+
+jobs:
+  build_and_push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v2
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v2
+        with:
+          context: .
+          file: ./Dockerfile # Path to your Dockerfile
+          push: true
+          tags: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPO_NAME }}:latest
+          build-args: |
+            DATABASE_URL=<your_database_url>
+            AWS_ACCESS_KEY_ID=<your_aws_access_key_id>
+            AWS_SECRET_ACCESS_KEY=<your_aws_secret_access_key>
+            # These are the environment variables typically stored in a .env file
+
+      - name: SSH into EC2, Log in to ECR with virtualenv
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.EC2_IP }}
+          username: ${{ env.SSH_USER }}
+          key: ${{ secrets.SSH_KEY }}
+          port: 22
+          script: |
+            echo "${{ secrets.SSH_KEY }}" > ssh_key.pem
+            cat ssh_key.pem
+
+            ecr_login_token=$(aws ecr get-login-password --region <your_aws_region>)
+        
+            # Log in to Amazon ECR
+            echo $ecr_login_token | docker login --username AWS --password-stdin <your_ecr_url>
+
+      - name: SSH into EC2, Stop and Remove Container
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.EC2_IP }}
+          username: ${{ env.SSH_USER }}
+          key: ${{ secrets.SSH_KEY }}
+          port: 22
+          script: |
+            docker stop ${{ env.CONTAINER_NAME }} || true
+            docker rm ${{ env.CONTAINER_NAME }} || true
+
+      - name: SSH into EC2, Remove Old Docker Image
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.EC2_IP }}
+          username: ${{ env.SSH_USER }}
+          key: ${{ secrets.SSH_KEY }}
+          port: 22
+          script: |
+            docker image rm ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPO_NAME }}:latest || true
+            
+      - name: SSH into EC2, Pull and Run New Image
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.EC2_IP }}
+          username: ${{ env.SSH_USER }}
+          key: ${{ secrets.SSH_KEY }}
+          port: 22
+          script: |
+            docker pull ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPO_NAME }}:latest
+            docker run -d -p 8081:8081 --name ${{ env.CONTAINER_NAME }} ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPO_NAME }}:latest
